@@ -17,28 +17,15 @@ void loop() {
   float temp=dht.readTemperature();
   float humid=dht.readHumidity();
   Serial.println("------ SENSOR READINGS ------"); 
-
-
   if (isnan(temp) || isnan(humid)) { 
-
   Serial.println("Temp & Humidity: Error reading from DHT11"); 
-
   } else { 
-
   Serial.print("Temp: "); 
-
   Serial.print(temp); 
-
   Serial.println(" C"); 
-
-  
-
   Serial.print("Humidity: "); 
-
   Serial.print(humid); 
-
   Serial.println(" %"); 
-
   delay(2000);
 }
 }
