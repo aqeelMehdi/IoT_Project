@@ -1,6 +1,5 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include <MQTTClient.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
 #include "MQ135.h"
@@ -13,18 +12,14 @@
 #define PMS_RX 16
 #define PMS_TX 17
 
-#define PUBLISH_INTERVAL_MS (4000UL) // 4 seconds
-#define DHT_MIN_INTERVAL_MS (2200UL) // DHT11 needs ~2s between reads
-
-#define AWS_IOT_PORT 8883
-#define AWS_IOT_PUBLISH_TOPIC "esp32/esp32-to-aws"
+#define PUBLISH_INTERVAL_MS (4000UL)
+#define DHT_MIN_INTERVAL_MS (2200UL)
 
 // ========================== SENSOR OBJECTS ==========================
 DHT dht(DHT_PIN, DHT_TYPE);
 HardwareSerial pmsSerial(2);
-MQ135 gasSensor(MQ135_PIN, 10.0, 76.6); // Adjust RZERO after calibration if needed.
+MQ135 gasSensor(MQ135_PIN, 10.0, 76.6);
 
-// PMS5003 data structure
 struct pms5003data {
   uint16_t framelen;
   uint16_t pm10_standard, pm25_standard, pm100_standard;
@@ -35,9 +30,12 @@ struct pms5003data {
 };
 pms5003data data;
 
-// ========================== AWS MQTT CLIENT ==========================
-WiFiClientSecure net;
-MQTTClient client(1024);
+// ========================== SERVER CONFIG ==========================
+const char* SERVER_HOST = "13.53.40.152"; // EC2 public IP
+const int SERVER_PORT = 443;               // HTTPS port
+const char* SERVER_URL  = "/update";       // Flask POST route
+
+WiFiClientSecure client;   // HTTPS client
 
 // ========================== GLOBALS ================================
 unsigned long lastPublishTime = 0;
@@ -46,89 +44,13 @@ float lastTempC = NAN, lastHumid = NAN;
 
 // ========================== DECLARATIONS ==========================
 void ensureWiFi();
-void ensureAWS();
 bool readPMSdata(Stream *s, pms5003data &out);
-void sendToAWS();
 float dewPoint(float tempC, float humidity);
 float computeHeatIndex(float tempC, float humidity);
 int computeAQI_PM25_US(float pm25);
 String getAQICategory(int aqi);
+void sendToServer();
 
-// ========================== SETUP ==========================
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
-  Serial.println("\nStarting ESP32 AWS IoT Environmental Node...");
-
-  dht.begin();
-  pmsSerial.begin(9600, SERIAL_8N1, PMS_RX, PMS_TX);
-
-  ensureWiFi();
-  ensureAWS();
-
-  Serial.println("Setup complete!\n");
-}
-
-// ========================== LOOP ==========================
-void loop() {
-  client.loop();
-
-  ensureWiFi();
-  if (!client.connected()) ensureAWS();
-
-  unsigned long now = millis();
-  if (now - lastPublishTime >= PUBLISH_INTERVAL_MS) {
-    sendToAWS();
-    lastPublishTime = now;
-  }
-}
-
-// ========================== WIFI ==========================
-void ensureWiFi() {
-  if (WiFi.status() == WL_CONNECTED) return;
-
-  Serial.print("Connecting to WiFi ");
-  Serial.println(WIFI_SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-    if (millis() - startAttempt > 20000UL) {
-      Serial.println("\nWiFi connect timeout, retrying...");
-      WiFi.disconnect();
-      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-      startAttempt = millis();
-    }
-  }
-  Serial.println("\nWiFi Connected!");
-  Serial.print("IP Address: ");
-  Serial.println(WiFi.localIP());
-}
-
-// ========================== AWS CONNECTION ==========================
-void ensureAWS() {
-  Serial.print("Connecting to AWS IoT Core");
-
-  net.setCACert(AWS_CERT_CA);
-  net.setCertificate(AWS_CERT_CRT);
-  net.setPrivateKey(AWS_CERT_PRIVATE);
-
-  client.begin(AWS_IOT_ENDPOINT, AWS_IOT_PORT, net);
-
-  uint8_t attempts = 0;
-  while (!client.connect(THINGNAME)) {
-    Serial.print(".");
-    delay(750);
-    if (++attempts >= 30) {
-      Serial.println("\nAWS IoT connection failed, will retry later.");
-      return;
-    }
-  }
-  Serial.println("\nConnected to AWS IoT Core!");
-}
 
 // ========================== PMS READER ==========================
 bool readPMSdata(Stream *s, pms5003data &out) {
@@ -204,11 +126,59 @@ String getAQICategory(int aqi) {
   else return "Hazardous";
 }
 
-// ========================== PUBLISH ==========================
-void sendToAWS() {
-  const unsigned long start_us = micros();
+// ========================== SETUP ==========================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("\nStarting ESP32 HTTPS Node...");
 
-  const unsigned long now = millis();
+  dht.begin();
+  pmsSerial.begin(9600, SERIAL_8N1, PMS_RX, PMS_TX);
+
+  ensureWiFi();
+  Serial.println("Setup complete!\n");
+}
+
+// ========================== LOOP ==========================
+void loop() {
+  ensureWiFi();
+
+  unsigned long now = millis();
+  if (now - lastPublishTime >= PUBLISH_INTERVAL_MS) {
+    sendToServer();
+    lastPublishTime = now;
+  }
+}
+
+// ========================== WIFI ==========================
+void ensureWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+
+  Serial.print("Connecting to WiFi ");
+  Serial.println(WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+    if (millis() - startAttempt > 20000UL) {
+      Serial.println("\nWiFi connect timeout, retrying...");
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      startAttempt = millis();
+    }
+  }
+  Serial.println("\nWiFi Connected!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+// ========================== SEND DATA ==========================
+void sendToServer() {
+  // Read sensors
+  unsigned long now = millis();
   if (now - lastDhtReadTime >= DHT_MIN_INTERVAL_MS || isnan(lastTempC) || isnan(lastHumid)) {
     lastTempC = dht.readTemperature();
     lastHumid = dht.readHumidity();
@@ -218,10 +188,7 @@ void sendToAWS() {
   bool pmsSuccess = readPMSdata(&pmsSerial, data);
   float co2_ppm = gasSensor.getPPM();
 
-  if (isnan(lastTempC) || isnan(lastHumid)) {
-    Serial.println("DHT11 Error - skipping publish.");
-    return;
-  }
+  if (isnan(lastTempC) || isnan(lastHumid)) return;
 
   float heatIndexC = computeHeatIndex(lastTempC, lastHumid);
   float dewPt = dewPoint(lastTempC, lastHumid);
@@ -229,9 +196,7 @@ void sendToAWS() {
   int aqi = computeAQI_PM25_US(pm25);
   String aqiCat = getAQICategory(aqi);
 
-  unsigned long elapsed_us = micros() - start_us;
-  double elapsed_ms = (double)elapsed_us / 1000.0;
-
+  // Build JSON payload
   StaticJsonDocument<1024> doc;
   doc["device_id"] = THINGNAME;
   doc["ip_address"] = WiFi.localIP().toString();
@@ -247,17 +212,40 @@ void sendToAWS() {
   doc["aqi_category"] = aqiCat;
   doc["co2_ppm"] = co2_ppm;
   doc["timestamp_ms"] = millis();
-  doc["computation_time_us"] = elapsed_us;
-  doc["computation_time_ms"] = elapsed_ms;
 
   String payload;
   serializeJson(doc, payload);
 
-  bool ok = client.publish(AWS_IOT_PUBLISH_TOPIC, payload);
+  // For testing with self-signed certificate
+  client.setInsecure();  // <-- use client.setCACert(ROOT_CA) for production
 
-  Serial.println(ok ? "Published to AWS IoT:" : "Publish FAILED!");
-  serializeJsonPretty(doc, Serial);
-  Serial.print("\nPayload bytes: ");
+  if (!client.connect(SERVER_HOST, SERVER_PORT)) {
+    Serial.println("Connection to server failed!");
+    return;
+  }
+
+  // Print payload info
+  Serial.print("Payload bytes: ");
   Serial.println(payload.length());
-  Serial.println("-----------------------------------\n");
+  Serial.println("-----------------------------------");
+
+  // Send HTTP headers
+  client.println("POST " + String(SERVER_URL) + " HTTP/1.1");
+  client.println("Host: " + String(SERVER_HOST));
+  client.println("Content-Type: application/json");
+  client.print("Content-Length: ");
+  client.println(payload.length());
+  client.println();
+  client.println(payload);
+
+  // Read response
+  while (client.connected()) {
+    String line = client.readStringUntil('\n');
+    if (line == "\r") break;
+  }
+  String response = client.readString();
+  Serial.println("Server response:");
+  Serial.println(response);
+
+  client.stop();
 }
