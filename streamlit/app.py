@@ -3,7 +3,7 @@ import pandas as pd
 from pyathena import connect
 import os # Used for reading secrets
 
-from secrets import AWS_ACCESS_KEY, AWS_SECRET_KEY 
+from keys import AWS_ACCESS_KEY, AWS_SECRET_KEY 
 
 # 1. Configuration (Read from environment variables or Streamlit secrets)
 AWS_REGION = os.environ.get("AWS_REGION", "eu-north-1") # Your AWS Region
